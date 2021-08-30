@@ -41,3 +41,4 @@ Makefile
 
 doc-dev
 /static/
+/django_movie/secret_settings.py

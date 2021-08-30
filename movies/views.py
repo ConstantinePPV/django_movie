@@ -1,129 +1,111 @@
-from django.db.models import Q
-from django.http import JsonResponse, HttpResponse
-from django.shortcuts import redirect
-from django.views import View
-from django.views.generic import ListView, DetailView
+from django.db import models
+from rest_framework import generics, permissions, viewsets
+from django_filters.rest_framework import DjangoFilterBackend
 
-from .forms import ReviewForm, RatingForm
-from .models import Movie, Category, Actor, Genre, Rating
-
-
-class GenreYear:
-    """Жанры и года выхода фильмов"""
-
-    def get_genres(self):
-        return Genre.objects.all()
-
-    def get_years(self):
-        return Movie.objects.filter(draft=False).values("year")
+from .models import Movie, Actor
+from .serializers import (
+    MovieListSerializer,
+    MovieDetailSerializer,
+    ReviewCreateSerializer,
+    CreateRatingSerializer,
+    ActorListSerializer,
+    ActorDetailSerializer,
+)
+from .service import get_client_ip, MovieFilter, PaginationMovies
 
 
-class MovieView(GenreYear, ListView):
-    """Список фильмов"""
-    model = Movie
-    queryset = Movie.objects.filter(draft=False)
-    paginate_by = 3
-
-
-class MovieDetailView(GenreYear, DetailView):
-    """Полное описание фильма"""
-    model = Movie
-    slug_field = "url"
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context["star_form"] = RatingForm()
-        context["form"] = ReviewForm()
-        return context
-
-
-class AddReview(View):
-    """Отзывы"""
-
-    def post(self, request, pk):
-        form = ReviewForm(request.POST)
-        movie = Movie.objects.get(id=pk)
-        if form.is_valid():
-            form = form.save(commit=False)
-            if request.POST.get("parent", None):
-                form.parent_id = int(request.POST.get("parent"))
-            form.movie = movie
-            form.save()
-        return redirect(movie.get_absolute_url())
-
-
-class ActorView(GenreYear, DetailView):
-    """Вывод информации об актере"""
-    model = Actor
-    template_name = 'movies/actor.html'
-    slug_field = "name"
-
-
-class FilterMoviesView(GenreYear, ListView):
-    """Фильтр фильмов"""
-    paginate_by = 2
+class MovieViewSet(viewsets.ReadOnlyModelViewSet):
+    """Вывод списка фильмов"""
+    filter_backends = (DjangoFilterBackend,)
+    filterset_class = MovieFilter
+    pagination_class = PaginationMovies
 
     def get_queryset(self):
-        queryset = Movie.objects.filter(
-            Q(year__in=self.request.GET.getlist("year")) |
-            Q(genres__in=self.request.GET.getlist("genre"))
-        ).distinct()
-        return queryset
+        movies = Movie.objects.filter(draft=False).annotate(
+            rating_user=models.Count(
+                "ratings", filter=models.Q(ratings__ip=get_client_ip(self.request)))
+        ).annotate(
+            middle_star=models.Sum(models.F('ratings__star')) / models.Count(models.F('ratings'))
+        )
+        return movies
 
-    def get_context_data(self, *args, **kwargs):
-        context = super().get_context_data(*args, **kwargs)
-        context["year"] = ''.join([f"year={x}&" for x in self.request.GET.getlist("year")])
-        context["genre"] = ''.join([f"genre={x}&" for x in self.request.GET.getlist("genre")])
-        return  context
-
-
-class JsonFilterMoviesView(ListView):
-    """Фильтр фильмов в json"""
-
-    def get_queryset(self):
-        queryset = Movie.objects.filter(
-            Q(year__in=self.request.GET.getlist("year")) |
-            Q(genres__in=self.request.GET.getlist("genre"))
-        ).distinct().values("title", "tagline", "url", "poster")
-        return queryset
-
-    def get(self, request, *args, **kwargs):
-        queryset = list(self.get_queryset())
-        return JsonResponse({"movies": queryset}, safe=False)
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return MovieListSerializer
+        elif self.action == 'retrieve':
+            return MovieDetailSerializer
 
 
-class AddStarRating(View):
-    """ДОбавление райтинга к фильму"""
-
-    def get_client_ip(self, request):
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        if x_forwarded_for:
-            ip = x_forwarded_for.split(',')[0]
-        else:
-            ip = request.META.get('REMOTE_ADDR')
-        return ip
-
-    def post(self, request):
-        form = RatingForm(request.POST)
-        if form.is_valid():
-            Rating.objects.update_or_create(
-                ip=self.get_client_ip(request),
-                movie_id=int(request.POST.get("movie")),
-                defaults={'star_id': int(request.POST.get("star"))}
-            )
-            return HttpResponse(status=201)
-        else:
-            return HttpResponse(status=400)
+class ReviewCreateViewSet(viewsets.ModelViewSet):
+    """Добавление отзыва к фильму"""
+    serializer_class = ReviewCreateSerializer
 
 
-class Search(ListView):
-    """Поиск фильмов"""
-    paginate_by = 3
+class AddStarRatingViewSet(viewsets.ModelViewSet):
+    """Добавление рейтинга к фильму"""
+    serializer_class = CreateRatingSerializer
 
-    def get_queryset(self):
-        return Movie.objects.filter(title__icontains=self.request.GET.get("q"))
+    def perform_create(self, serializer):
+        serializer.save(ip=get_client_ip(self.request))
 
-    def get_context_data(self, *args, **kwargs):
-        context = super().get_context_data(*args, **kwargs)
-        context["q"] = f'q={self.request.GET.get("q")}&'
-        return  context
+
+class ActorsViewSet(viewsets.ReadOnlyModelViewSet):
+    """Вывод списка актеров и режиссеров"""
+    queryset = Actor.objects.all()
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ActorListSerializer
+        elif self.action == 'retrieve':
+            return ActorDetailSerializer
+
+
+
+# class MovieListView(generics.ListAPIView):
+#     """Вывод списка фильмов"""
+#     serializer_class = MovieListSerializer
+#     filter_backends = (DjangoFilterBackend,)
+#     filterset_class = MovieFilter
+#     permission_classes = [permissions.IsAuthenticated]
+#
+#     def get_queryset(self):
+#         movies = Movie.objects.filter(draft=False).annotate(
+#             rating_user=models.Count(
+#                 "ratings", filter=models.Q(ratings__ip=get_client_ip(self.request)))
+#         ).annotate(
+#             middle_star=models.Sum(models.F('ratings__star')) / models.Count(models.F('ratings'))
+#         )
+#         return movies
+
+
+# class MovieDetailView(generics.RetrieveAPIView):
+#     """Вывод фильма"""
+#
+#     queryset = Movie.objects.filter(draft=False)
+#     serializer_class = MovieDetailSerializer
+
+
+# class ReviewCreateView(generics.CreateAPIView):
+#     """Добавление отзыва к фильму"""
+#
+#     serializer_class = ReviewCreateSerializer
+
+
+# class AddStarRatingView(generics.CreateAPIView):
+#     """Добавление рейтинга к фильму"""
+#     serializer_class = CreateRatingSerializer
+#
+#     def perform_create(self, serializer):
+#         serializer.save(ip=get_client_ip(self.request))
+
+
+# class ActorListView(generics.ListAPIView):
+#     """Вывод списка актеров и режиссеров"""
+#     queryset = Actor.objects.all()
+#     serializer_class = ActorListSerializer
+#
+#
+# class ActorDetailView(generics.RetrieveAPIView):
+#     """Вывод полного описания актера или режиссера"""
+#     queryset = Actor.objects.all()
+#     serializer_class = ActorDetailSerializer
